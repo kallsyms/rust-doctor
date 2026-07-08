@@ -13,6 +13,7 @@ A Rust-native CLI static-analysis tool inspired by [react-doctor](https://github
   - [Filtering](#filtering)
   - [Output Formats](#output-formats)
 - [Configuration](#configuration)
+- [Health Score](#health-score)
 - [Rule Philosophy](#rule-philosophy)
 - [MVP Rule List](#mvp-rule-list)
 - [Phase-2 Deferred Rules](#phase-2-deferred-rules)
@@ -110,6 +111,22 @@ warn = ["anti.deny-warnings"]         # upgrade severity for specific rules
 info = []                             # downgrade severity for specific rules
 ```
 
+
+## Health Score
+
+rust-doctor prints a React Doctor-style health score in human output and includes the same data in JSON under `summary.health`.
+
+The score starts at `100` and deducts points by severity and confidence:
+
+| Finding | High confidence | Medium confidence | Low confidence |
+|---------|-----------------|-------------------|----------------|
+| Error | -30 | -24 | -18 |
+| Warning | -10 | -8 | -6 |
+| Info | -3 | -2 | -1 |
+
+Grades are intentionally simple: `A` = 90-100, `B` = 75-89, `C` = 60-74, `D` = 40-59, and `F` = 0-39. The score is a quick triage signal, not a replacement for reading findings.
+
+---
 ---
 
 ## Rule Philosophy
@@ -176,7 +193,13 @@ The `--format json` output is a JSON serialization of the `Report` model:
     "total": 2,
     "errors": 0,
     "warnings": 1,
-    "infos": 1
+    "infos": 1,
+    "health": {
+      "score": 88,
+      "grade": "B",
+      "label": "Good",
+      "deductions": 12
+    }
   },
   "findings": [
     {

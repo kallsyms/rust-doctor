@@ -116,17 +116,86 @@ pub struct Finding {
     pub llm_fix_prompt: Option<String>,
 }
 
+/// Aggregate health score for a report.
+///
+/// The score starts at 100 and deducts points for findings based on severity
+/// and confidence. It is intentionally simple and stable so humans and LLM
+/// agents can quickly understand whether a codebase is healthy, needs cleanup,
+/// or has serious risks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthScore {
+    /// 0-100 codebase health score, where 100 means no findings.
+    pub score: u8,
+    /// Letter grade derived from `score`.
+    pub grade: String,
+    /// Human-readable grade label.
+    pub label: String,
+    /// Raw deduction total before the score is clamped at zero.
+    pub deductions: u16,
+}
+
+impl Default for HealthScore {
+    fn default() -> Self {
+        Self {
+            score: 100,
+            grade: "A".to_string(),
+            label: "Excellent".to_string(),
+            deductions: 0,
+        }
+    }
+}
+
+impl HealthScore {
+    pub fn from_findings(findings: &[Finding]) -> Self {
+        let deductions: u16 = findings.iter().map(finding_deduction).sum();
+        let score = 100_u16.saturating_sub(deductions.min(100)) as u8;
+        let (grade, label) = grade_for(score);
+
+        Self {
+            score,
+            grade: grade.to_string(),
+            label: label.to_string(),
+            deductions,
+        }
+    }
+}
+
+fn finding_deduction(finding: &Finding) -> u16 {
+    match (finding.severity, finding.confidence) {
+        (Severity::Error, Confidence::High) => 30,
+        (Severity::Error, Confidence::Medium) => 24,
+        (Severity::Error, Confidence::Low) => 18,
+        (Severity::Warning, Confidence::High) => 10,
+        (Severity::Warning, Confidence::Medium) => 8,
+        (Severity::Warning, Confidence::Low) => 6,
+        (Severity::Info, Confidence::High) => 3,
+        (Severity::Info, Confidence::Medium) => 2,
+        (Severity::Info, Confidence::Low) => 1,
+    }
+}
+
+fn grade_for(score: u8) -> (&'static str, &'static str) {
+    match score {
+        90..=100 => ("A", "Excellent"),
+        75..=89 => ("B", "Good"),
+        60..=74 => ("C", "Fair"),
+        40..=59 => ("D", "Risky"),
+        _ => ("F", "Critical"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
-/// Aggregate counts for a report.
+/// Aggregate counts and score for a report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Summary {
     pub total: usize,
     pub errors: usize,
     pub warnings: usize,
     pub infos: usize,
+    pub health: HealthScore,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +238,7 @@ impl Summary {
                 Severity::Info => s.infos += 1,
             }
         }
+        s.health = HealthScore::from_findings(findings);
         s
     }
 }
@@ -225,6 +295,8 @@ mod tests {
         assert_eq!(s.errors, 1);
         assert_eq!(s.warnings, 1);
         assert_eq!(s.infos, 1);
+        assert_eq!(s.health.score, 61);
+        assert_eq!(s.health.grade, "C");
     }
 
     #[test]

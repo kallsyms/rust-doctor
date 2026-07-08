@@ -16,6 +16,10 @@ pub fn render(report: &Report) -> String {
 
     let s = &report.summary;
     out.push_str(&format!(
+        "Score: {}/100 ({} — {})\n",
+        s.health.score, s.health.grade, s.health.label
+    ));
+    out.push_str(&format!(
         "Summary: {} total ({} errors, {} warnings, {} infos)\n\n",
         s.total, s.errors, s.warnings, s.infos
     ));
