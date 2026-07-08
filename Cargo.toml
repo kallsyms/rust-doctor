@@ -1,0 +1,29 @@
+[package]
+name = "rust-doctor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust-native static-analysis CLI for idioms, patterns, and anti-patterns"
+repository = "https://github.com/example/rust-doctor"
+readme = "README.md"
+
+[[bin]]
+name = "rust-doctor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+cargo_metadata = "0.18"
+clap = { version = "4", features = ["derive"] }
+owo-colors = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit", "extra-traits", "parsing"] }
+quote = "1"
+thiserror = "1"
+toml = "0.8"
+walkdir = "2"
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"
