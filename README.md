@@ -348,4 +348,4 @@ All three formats should produce consistent findings. The JSON output should be 
 
 ---
 
-*rust-doctor is released under the MIT license. Rule references are based on the Rust unofficial patterns project (MPL-2.0).*
+*rust-doctor is released under the Apache License 2.0. Rule references are based on the Rust unofficial patterns project (MPL-2.0).*

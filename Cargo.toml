@@ -2,7 +2,7 @@
 name = "rust-doctor"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 description = "Rust-native static-analysis CLI for idioms, patterns, and anti-patterns"
 repository = "https://github.com/example/rust-doctor"
 readme = "README.md"
