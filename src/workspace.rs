@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use cargo_metadata::MetadataCommand;
 
+use crate::analysis;
 use crate::config::Config;
 use crate::diagnostic::Report;
 use crate::rules::registry::{Registry, RuleContext};
@@ -104,6 +105,7 @@ impl Workspace {
                 });
             }
 
+            // Collect lib and bin source files first.
             for pkg in &packages {
                 if let Some(ref lib_path) = pkg.source_lib {
                     if lib_path.is_file() {
@@ -117,6 +119,28 @@ impl Workspace {
                 }
             }
 
+            // Now scan for module files under src/**/*.rs for each package.
+            for pkg in &packages {
+                let pkg_root = pkg
+                    .manifest_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| pkg.manifest_path.clone());
+
+                // Look for a src/ directory relative to the manifest.
+                let src_dir = pkg_root.join("src");
+                if src_dir.is_dir() {
+                    let mut module_files = Vec::new();
+                    analysis::collect_rust_files(&src_dir, &mut module_files);
+                    for f in module_files {
+                        // Avoid duplicates (lib.rs and main.rs may already be included).
+                        if !source_files.contains(&f) {
+                            source_files.push(f);
+                        }
+                    }
+                }
+            }
+
             Ok(Workspace {
                 root,
                 packages,
@@ -125,7 +149,7 @@ impl Workspace {
         } else {
             // Fallback: discover loose .rs files in the directory tree.
             let mut source_files = Vec::new();
-            collect_rust_files(path, &mut source_files);
+            analysis::collect_rust_files(path, &mut source_files);
             Ok(Workspace {
                 root: path.to_path_buf(),
                 packages: Vec::new(),
@@ -187,33 +211,5 @@ impl Workspace {
         report.compute_summary();
 
         Ok(report)
-    }
-}
-
-/// Recursively collect .rs files from a directory.
-fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    if !dir.is_dir() {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name() == Some("target".as_ref())
-                || path.file_name() == Some(".git".as_ref())
-            {
-                continue;
-            }
-            collect_rust_files(&path, files);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            files.push(path);
-        }
     }
 }

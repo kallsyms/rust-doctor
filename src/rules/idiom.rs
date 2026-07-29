@@ -684,3 +684,433 @@ fn find_enum_line(content: &str, ident: &syn::Ident) -> Option<u32> {
         .position(|l| l.contains("enum") && l.contains(&ident.to_string()))
         .map(|n| n as u32 + 1)
 }
+
+// ---------------------------------------------------------------------------
+// IdiomTemporaryMutability
+// ---------------------------------------------------------------------------
+
+/// Flag variables declared `mut` but never modified after initial assignment.
+///
+/// Conservative heuristic: checks if a `mut` binding has any `=` assignment
+/// after its declaration line. Only scans public function bodies.
+#[derive(Default)]
+pub struct IdiomTemporaryMutability;
+
+impl Rule for IdiomTemporaryMutability {
+    fn id(&self) -> &'static str {
+        "idiom.temporary-mutability"
+    }
+
+    fn title(&self) -> &'static str {
+        "Consider removing unnecessary `mut` declarations"
+    }
+
+    fn category(&self) -> Category {
+        Category::Idiom
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
+    fn default_confidence(&self) -> Confidence {
+        Confidence::Medium
+    }
+
+    fn description(&self) -> &'static str {
+        "Detects `mut` bindings that are only assigned once, suggesting `let` instead of `let mut`."
+    }
+
+    fn references(&self) -> Vec<&'static str> {
+        vec!["https://rust-unofficial.github.io/patterns/idioms/temporary-mutability.html"]
+    }
+
+    fn llm_fix_prompt(&self) -> Option<&'static str> {
+        Some("Remove `mut` from bindings that are assigned only once. This clarifies intent and enables compiler optimizations.")
+    }
+
+    fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
+        for pkg in ctx.metadata.packages.iter() {
+            for target in &pkg.targets {
+                let src_path = target.src_path.as_path();
+                if !src_path.exists() {
+                    continue;
+                }
+                let content = std::fs::read_to_string(src_path)?;
+                let file: File = match syn::parse_file(&content) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                for item in &file.items {
+                    if let syn::Item::Fn(fn_item) = item {
+                        let vis_str = fn_item.vis.to_token_stream().to_string();
+                        if !vis_str.contains("pub") {
+                            continue;
+                        }
+
+                        // Find all `let mut` bindings in the function
+                        let fn_content_start = content
+                            .find(&format!("fn {}", fn_item.sig.ident))
+                            .unwrap_or(0);
+                        // Find body start
+                        let body_start = content[fn_content_start..]
+                            .find('{')
+                            .map(|o| fn_content_start + o + 1)
+                            .unwrap_or(fn_content_start);
+                        let body_end = content[body_start..].find('}').map(|o| body_start + o);
+
+                        if let Some(end) = body_end {
+                            let body = &content[body_start..end];
+                            let body_start_line = content[..body_start].lines().count() as u32;
+
+                            // Look for `let mut` declarations
+                            for (idx, line) in body.lines().enumerate() {
+                                let trimmed = line.trim();
+                                if trimmed.starts_with("let mut ")
+                                    || trimmed.starts_with("let mut\t")
+                                {
+                                    // Extract the variable name
+                                    if let Some(rest) = trimmed
+                                        .strip_prefix("let mut ")
+                                        .or_else(|| trimmed.strip_prefix("let mut\t"))
+                                    {
+                                        let var_name = rest
+                                            .split(&['=', ' ', '\t', ';'][..])
+                                            .next()
+                                            .unwrap_or("")
+                                            .to_string();
+                                        if var_name.is_empty() {
+                                            continue;
+                                        }
+
+                                        // Check if the variable is reassigned after this line
+                                        let line_in_file = body_start_line + idx as u32;
+                                        let after_decl =
+                                            &content[line_in_file as usize..end.min(content.len())];
+                                        let reassignment_count = after_decl
+                                            .lines()
+                                            .skip(1) // skip the declaration line itself
+                                            .filter(|l| {
+                                                let t = l.trim();
+                                                // Check for reassignment patterns like `var = ` or `var.push(` etc
+                                                t.contains(&format!("{var_name} ="))
+                                                    || t.contains(&format!("{var_name}.push("))
+                                                    || t.contains(&format!("{var_name}.clear("))
+                                                    || t.contains(&format!("{var_name}.insert("))
+                                                    || t.contains(&format!("{var_name}.extend("))
+                                                    || t.contains(&format!("{var_name}["))
+                                            })
+                                            .count();
+
+                                        if reassignment_count == 0 {
+                                            out.push(Finding {
+                                                rule_id: self.id().to_string(),
+                                                title: self.title().to_string(),
+                                                category: self.category(),
+                                                severity: self.default_severity(),
+                                                confidence: self.default_confidence(),
+                                                location: Some(Location {
+                                                    path: src_path.to_path_buf().into(),
+                                                    line: Some(line_in_file),
+                                                    column: None,
+                                                    end_line: Some(line_in_file),
+                                                    end_column: None,
+                                                }),
+                                                message: format!(
+                                                    "`{var_name}` is declared `mut` but never reassigned; consider `let`"
+                                                ),
+                                                why_it_matters: "Unnecessary `mut` declarations obscure the intent that a value is constant after initialization. Removing them enables compiler optimizations and improves code readability.".to_string(),
+                                                suggestion: Some(format!(
+                                                    "Change `let mut {var_name}` to `let {var_name}`"
+                                                )),
+                                                references: self.references().into_iter().map(String::from).collect(),
+                                                llm_fix_prompt: self.llm_fix_prompt().map(String::from),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IdiomReturnConsumedArgOnError
+// ---------------------------------------------------------------------------
+
+/// Flag public functions returning `Result<T, E>` where `E` could contain
+/// the consumed argument for error context.
+///
+/// Conservative heuristic: flags functions where the return type is
+/// `Result<_, E>` and the parameter names suggest ownership transfer
+/// (no `&` prefix) — suggesting the error type should capture the
+/// consumed argument for debugging.
+#[derive(Default)]
+pub struct IdiomReturnConsumedArgOnError;
+
+impl Rule for IdiomReturnConsumedArgOnError {
+    fn id(&self) -> &'static str {
+        "idiom.return-consumed-arg-on-error"
+    }
+
+    fn title(&self) -> &'static str {
+        "Consider returning consumed argument in error"
+    }
+
+    fn category(&self) -> Category {
+        Category::Idiom
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
+    fn default_confidence(&self) -> Confidence {
+        Confidence::Medium
+    }
+
+    fn description(&self) -> &'static str {
+        "Suggests including consumed arguments in error variants so callers can debug failures with context about what was attempted."
+    }
+
+    fn references(&self) -> Vec<&'static str> {
+        vec!["https://rust-unofficial.github.io/patterns/anti-patterns/clippy/return_self_not_must_use.html"]
+    }
+
+    fn llm_fix_prompt(&self) -> Option<&'static str> {
+        Some("Include consumed arguments in error variants so that error messages provide context about what was attempted.")
+    }
+
+    fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
+        for pkg in ctx.metadata.packages.iter() {
+            for target in &pkg.targets {
+                let src_path = target.src_path.as_path();
+                if !src_path.exists() {
+                    continue;
+                }
+                let content = std::fs::read_to_string(src_path)?;
+                let file: File = match syn::parse_file(&content) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                for item in &file.items {
+                    if let syn::Item::Fn(fn_item) = item {
+                        let vis_str = fn_item.vis.to_token_stream().to_string();
+                        if !vis_str.contains("pub") {
+                            continue;
+                        }
+
+                        // Skip standard library constructors
+                        let fn_name = fn_item.sig.ident.to_string();
+                        if matches!(
+                            fn_name.as_str(),
+                            "Ok" | "Err" | "Some" | "None" | "Default" | "new"
+                        ) {
+                            continue;
+                        }
+
+                        // Check if return type is Result<_, _>
+                        let is_result = match &fn_item.sig.output {
+                            syn::ReturnType::Type(_, ty) => {
+                                if let syn::Type::Path(type_path) = ty.as_ref() {
+                                    type_path
+                                        .path
+                                        .segments
+                                        .last()
+                                        .map(|s| s.ident == "Result")
+                                        .unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            }
+                            syn::ReturnType::Default => false,
+                        };
+
+                        if !is_result {
+                            continue;
+                        }
+
+                        // Check if there are owned (non-reference) parameters
+                        let has_owned_args = fn_item.sig.inputs.iter().any(|arg| {
+                            if let syn::FnArg::Typed(pat_type) = arg {
+                                let ty_str = pat_type.ty.to_token_stream().to_string();
+                                // Skip if it's a reference type
+                                !ty_str.starts_with("&") && !ty_str.starts_with("& mut")
+                            } else {
+                                false
+                            }
+                        });
+
+                        if has_owned_args {
+                            let fn_name = fn_item.sig.ident.to_string();
+                            let line = content
+                                .lines()
+                                .position(|l| l.contains("fn") && l.contains(&fn_name))
+                                .map(|n| n as u32 + 1)
+                                .unwrap_or(0);
+
+                            out.push(Finding {
+                                rule_id: self.id().to_string(),
+                                title: self.title().to_string(),
+                                category: self.category(),
+                                severity: self.default_severity(),
+                                confidence: self.default_confidence(),
+                                location: Some(Location {
+                                    path: src_path.to_path_buf().into(),
+                                    line: Some(line),
+                                    column: None,
+                                    end_line: Some(line),
+                                    end_column: None,
+                                }),
+                                message: format!(
+                                    "Function `{fn_name}` returns `Result` with owned arguments; consider including consumed args in error variants for better error context"
+                                ),
+                                why_it_matters: "When a function consumes arguments and can fail, including the consumed values in the error type helps callers debug what went wrong without re-running the function.".to_string(),
+                                suggestion: Some("Add consumed argument types to the error enum so that `Err(e)` includes context about what was attempted.".to_string()),
+                                references: self.references().into_iter().map(String::from).collect(),
+                                llm_fix_prompt: self.llm_fix_prompt().map(String::from),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IdiomMemTakeReplace
+// ---------------------------------------------------------------------------
+
+/// Suggest `mem::take` / `mem::replace` / `Option::take` instead of `.clone()`
+/// when only a default/empty value is needed temporarily.
+#[derive(Default)]
+pub struct IdiomMemTakeReplace;
+
+impl Rule for IdiomMemTakeReplace {
+    fn id(&self) -> &'static str {
+        "idiom.mem-take-replace"
+    }
+
+    fn title(&self) -> &'static str {
+        "Use mem::take / mem::replace instead of clone for temporary ownership"
+    }
+
+    fn category(&self) -> Category {
+        Category::Idiom
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
+    fn default_confidence(&self) -> Confidence {
+        Confidence::Medium
+    }
+
+    fn description(&self) -> &'static str {
+        "Detects `.clone()` followed by `.clear()` or similar patterns that could use `mem::take` / `mem::replace` / `Option::take` for zero-copy ownership transfer."
+    }
+
+    fn references(&self) -> Vec<&'static str> {
+        vec!["https://doc.rust-lang.org/std/mem/fn.take.html"]
+    }
+
+    fn llm_fix_prompt(&self) -> Option<&'static str> {
+        Some("Replace `.clone()` followed by `.clear()` with `std::mem::take(&mut value)` for zero-copy ownership transfer.")
+    }
+
+    fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
+        for pkg in ctx.metadata.packages.iter() {
+            for target in &pkg.targets {
+                let src_path = target.src_path.as_path();
+                if !src_path.exists() {
+                    continue;
+                }
+                let content = std::fs::read_to_string(src_path)?;
+
+                // Pattern 1: `let x = value.clone(); value.clear();` (two lines)
+                // We look for clone + clear within a few lines of each other
+                let lines: Vec<&str> = content.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let trimmed = line.trim();
+                    // Look for clone on a variable
+                    if let Some(clone_match) = trimmed.strip_prefix("let ") {
+                        if clone_match.contains(".clone()") {
+                            // Extract variable being cloned
+                            if let Some((var_part, _)) = clone_match.split_once(" = ") {
+                                let _var_name = var_part
+                                    .split(&[':', ' ', '\t'][..])
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let clone_pos = clone_match.find(".clone()").unwrap_or(0);
+                                // Extract the source variable from the clone expression
+                                let source_expr =
+                                    clone_match[clone_pos..].trim_end_matches(".clone()");
+                                // source_expr might be `value`, `self.value`, etc.
+                                let source_var = source_expr
+                                    .split('.')
+                                    .next_back()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string();
+
+                                // Check next few lines for .clear() on the same variable
+                                let check_end = (i + 5).min(lines.len());
+                                for j in (i + 1)..check_end {
+                                    let next_line = lines[j].trim();
+                                    if next_line.contains(&format!("{source_var}.clear()"))
+                                        || next_line.contains(&format!("{source_var}.drain(.."))
+                                    {
+                                        let find_line = lines[..i]
+                                            .iter()
+                                            .position(|l| {
+                                                l.contains(&format!("{source_var}.clone()"))
+                                            })
+                                            .map(|n| n as u32 + 1)
+                                            .unwrap_or((i + 1) as u32);
+
+                                        out.push(Finding {
+                                            rule_id: self.id().to_string(),
+                                            title: self.title().to_string(),
+                                            category: self.category(),
+                                            severity: self.default_severity(),
+                                            confidence: self.default_confidence(),
+                                            location: Some(Location {
+                                                path: src_path.to_path_buf().into(),
+                                                line: Some(find_line),
+                                                column: None,
+                                                end_line: Some(find_line),
+                                                end_column: None,
+                                            }),
+                                            message: format!(
+                                                "`.clone()` followed by `.clear()` on `{source_var}` can be replaced with `std::mem::take(&mut {source_var})`"
+                                            ),
+                                            why_it_matters: "Cloning then clearing allocates memory unnecessarily. `mem::take` swaps in a default value and returns the original, achieving the same effect with zero additional allocations.".to_string(),
+                                            suggestion: Some(format!(
+                                                "Replace `let x = {source_var}.clone(); {source_var}.clear();` with `let x = std::mem::take(&mut {source_var});`"
+                                            )),
+                                            references: self.references().into_iter().map(String::from).collect(),
+                                            llm_fix_prompt: self.llm_fix_prompt().map(String::from),
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

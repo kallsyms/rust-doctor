@@ -91,16 +91,21 @@ impl Registry {
         use crate::rules::rules::*;
         self.register(Box::new(AntiDenyWarnings));
         self.register(Box::new(AntiDerefPolymorphism));
+        self.register(Box::new(AntiCloneToSatisfyBorrowChecker));
         self.register(Box::new(IdiomBorrowedArgs));
         self.register(Box::new(IdiomDefaultTrait));
         self.register(Box::new(IdiomOptionIteration));
         self.register(Box::new(IdiomPrivacyExtensibility));
+        self.register(Box::new(IdiomTemporaryMutability));
+        self.register(Box::new(IdiomReturnConsumedArgOnError));
+        self.register(Box::new(IdiomMemTakeReplace));
         self.register(Box::new(PatternBuilder));
         self.register(Box::new(PatternContainUnSafety));
         self.register(Box::new(PatternCustomTraitsForBounds));
         self.register(Box::new(PatternSmallCrates));
-        // Phase-2 stubs (inert):
-        self.register(Box::new(AntiCloneToSatisfyBorrowChecker));
+        self.register(Box::new(PatternComposeStructs));
+        self.register(Box::new(PatternRaiiGuard));
+        // Phase-3 stubs (inert):
         self.register(Box::new(FfiIdiomaticErrors));
         self.register(Box::new(PatternNewtype));
     }
@@ -137,16 +142,21 @@ mod tests {
         let ids = reg.rule_ids();
         assert!(ids.contains(&"anti.deny-warnings"));
         assert!(ids.contains(&"anti.deref-polymorphism"));
+        assert!(ids.contains(&"anti.clone-to-satisfy-borrow-checker"));
         assert!(ids.contains(&"idiom.borrowed-args"));
         assert!(ids.contains(&"idiom.default-trait"));
         assert!(ids.contains(&"idiom.option-iteration"));
         assert!(ids.contains(&"idiom.privacy-extensibility"));
+        assert!(ids.contains(&"idiom.temporary-mutability"));
+        assert!(ids.contains(&"idiom.return-consumed-arg-on-error"));
+        assert!(ids.contains(&"idiom.mem-take-replace"));
         assert!(ids.contains(&"pattern.builder"));
         assert!(ids.contains(&"pattern.contain-unsafety"));
         assert!(ids.contains(&"pattern.custom-traits-for-bounds"));
         assert!(ids.contains(&"pattern.small-crates"));
-        // Phase-2 stubs
-        assert!(ids.contains(&"anti.clone-to-satisfy-borrow-checker"));
+        assert!(ids.contains(&"pattern.compose-structs"));
+        assert!(ids.contains(&"pattern.raii-guard"));
+        // Phase-3 stubs
         assert!(ids.contains(&"ffi.idiomatic-errors"));
         assert!(ids.contains(&"pattern.newtype"));
     }

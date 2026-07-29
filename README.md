@@ -13,6 +13,8 @@ A Rust-native CLI static-analysis tool inspired by [react-doctor](https://github
   - [Filtering](#filtering)
   - [Output Formats](#output-formats)
 - [Configuration](#configuration)
+- [Health Score](#health-score)
+- [Source-Level Suppressions](#source-level-suppressions)
 - [Rule Philosophy](#rule-philosophy)
 - [MVP Rule List](#mvp-rule-list)
 - [Phase-2 Deferred Rules](#phase-2-deferred-rules)
@@ -110,6 +112,71 @@ warn = ["anti.deny-warnings"]         # upgrade severity for specific rules
 info = []                             # downgrade severity for specific rules
 ```
 
+
+## Health Score
+
+rust-doctor prints a React Doctor-style health score in human output and includes the same data in JSON under `summary.health`.
+
+The score starts at `100` and deducts points by severity and confidence:
+
+| Finding | High confidence | Medium confidence | Low confidence |
+|---------|-----------------|-------------------|----------------|
+| Error | -30 | -24 | -18 |
+| Warning | -10 | -8 | -6 |
+| Info | -3 | -2 | -1 |
+
+Grades are intentionally simple: `A` = 90-100, `B` = 75-89, `C` = 60-74, `D` = 40-59, and `F` = 0-39. The score is a quick triage signal, not a replacement for reading findings.
+
+---
+---
+
+## Source-Level Suppressions
+
+rust-doctor supports inline comment-based suppressions to silence findings for specific rules or lines. These are parsed from `.rs` source files during scanning.
+
+### `rust-doctor-allow RULE`
+
+Place this comment on the same line or a preceding line to suppress a specific rule across the file:
+
+```rust
+// rust-doctor-allow pattern.small-crates
+fn main() {
+    // All findings from `pattern.small-crates` in this file are suppressed.
+}
+```
+
+Use `// rust-doctor-allow` (without a rule ID) to suppress **all** rust-doctor findings in the file:
+
+```rust
+// rust-doctor-allow
+fn legacy_code() {
+    // All rust-doctor findings suppressed here.
+}
+```
+
+### `rust-doctor-disable-next-line RULE`
+
+Place this comment on the line immediately **before** the line you want to suppress:
+
+```rust
+// rust-doctor-disable-next-line anti.deny-warnings
+#![deny(warnings)]
+```
+
+Use `// rust-doctor-disable-next-line` without a rule ID to suppress all findings for the next line:
+
+```rust
+// rust-doctor-disable-next-line
+#![allow(clippy::all)] // lint suppression, not rust-doctor
+```
+
+### How Suppressions Work
+
+- **Global suppressions** (`rust-doctor-allow` on any line): All findings from that rule in the entire file are removed.
+- **Line-level suppressions** (`rust-doctor-disable-next-line`): Only the finding on the specified line for the specified rule is removed.
+- Suppressions are applied **before** health-score recomputation, so the final score reflects only the remaining (non-suppressed) findings.
+- Suppressions are parsed from all discovered `.rs` files via the workspace scanner (`src/**/*.rs`), not just crate roots.
+
 ---
 
 ## Rule Philosophy
@@ -145,6 +212,10 @@ The following rules are implemented in the current release:
 | `pattern.contain-unsafety` | Consider containing unsafe code | Organization | Info | Low |
 | `pattern.custom-traits-for-bounds` | Consider custom trait for complex bounds | Pattern | Info | Low |
 | `pattern.small-crates` | Consider splitting large crates | Organization | Info | Low |
+| `anti.clone-to-satisfy-borrow-checker` | Clone to satisfy borrow checker | Anti-Pattern | Warning | Medium |
+| `idiom.temporary-mutability` | Consider removing unnecessary `mut` declarations | Idiom | Info | Medium |
+| `idiom.return-consumed-arg-on-error` | Return consumed args on error | Idiom | Info | Medium |
+| `idiom.mem-take-replace` | Use `mem::take` / `mem::replace` | Idiom | Info | Medium |
 
 ---
 
@@ -154,11 +225,8 @@ These rules are registered but inert (emit no findings) until type/flow analysis
 
 | Rule ID | Title | Category | Severity |
 |---------|-------|----------|----------|
-| `anti.clone-to-satisfy-borrow-checker` | Clone to satisfy borrow checker | Anti-Pattern | Warning |
 | `ffi.idiomatic-errors` | FFI idiomatic errors | Toolchain | Warning |
 | `pattern.newtype` | Consider newtype for type safety | Pattern | Info |
-
-Future phases will add rules for: FFI string handling, RAII guards, compose structs, coercion arguments, mem::take/replace, temp mutability, return-consumed-arg-on-error, and more.
 
 ---
 
@@ -176,7 +244,13 @@ The `--format json` output is a JSON serialization of the `Report` model:
     "total": 2,
     "errors": 0,
     "warnings": 1,
-    "infos": 1
+    "infos": 1,
+    "health": {
+      "score": 88,
+      "grade": "B",
+      "label": "Good",
+      "deductions": 12
+    }
   },
   "findings": [
     {

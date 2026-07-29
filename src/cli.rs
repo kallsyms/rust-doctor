@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
+use crate::analysis;
 use crate::config::{self, Config};
 use crate::diagnostic::{Category, Report, Severity};
 use crate::output;
@@ -127,6 +128,52 @@ impl Runner {
     }
 
     fn apply_filters(&self, mut report: Report) -> Report {
+        // Apply source-level suppressions (rust-doctor-allow / rust-doctor-disable-next-line).
+        let mut suppressed_rules: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut line_suppressions: Vec<(std::path::PathBuf, String, u32)> = Vec::new();
+
+        // Scan all .rs files in the workspace root for suppressions.
+        if report.workspace_root.is_dir() {
+            let mut all_files = Vec::new();
+            analysis::collect_rust_files(&report.workspace_root, &mut all_files);
+            for file_path in all_files {
+                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    let suppressions = analysis::parse_suppressions(&content);
+                    for sup in suppressions {
+                        if let Some(ref rule_id) = sup.rule_id {
+                            suppressed_rules.insert(rule_id.clone());
+                        }
+                        let rid = sup.rule_id.clone().unwrap_or_default();
+                        line_suppressions.push((file_path.clone(), rid, sup.line));
+                    }
+                }
+            }
+        }
+
+        // Filter out findings for suppressed rules.
+        report.findings.retain(|f| {
+            if suppressed_rules.contains(&f.rule_id) {
+                return false;
+            }
+            // Also check disable-next-line style suppressions by line number.
+            if let Some(ref loc) = f.location {
+                let content = match std::fs::read_to_string(&loc.path) {
+                    Ok(c) => c,
+                    Err(_) => return true,
+                };
+                let suppressions = analysis::parse_suppressions(&content);
+                if analysis::is_line_suppressed(
+                    &suppressions,
+                    &f.rule_id,
+                    f.location.as_ref().unwrap().line.unwrap_or(0),
+                ) {
+                    return false;
+                }
+            }
+            true
+        });
+
         // Category filter: CLI --category takes precedence.
         if let Some(ref cat) = self.cli.category {
             let cats: Vec<&str> = cat.split(',').collect();
@@ -147,7 +194,7 @@ impl Runner {
                 .retain(|f| severity_to_ord(f.severity) >= min);
         }
 
-        // Recompute summary after filtering.
+        // Recompute summary after filtering and suppression.
         report.compute_summary();
 
         report

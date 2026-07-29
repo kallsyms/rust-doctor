@@ -2,9 +2,11 @@
 
 pub use super::anti_patterns::{AntiDenyWarnings, AntiDerefPolymorphism};
 pub use super::idiom::{
-    IdiomBorrowedArgs, IdiomDefaultTrait, IdiomOptionIteration, IdiomPrivacyExtensibility,
+    IdiomBorrowedArgs, IdiomDefaultTrait, IdiomMemTakeReplace, IdiomOptionIteration,
+    IdiomPrivacyExtensibility, IdiomReturnConsumedArgOnError, IdiomTemporaryMutability,
 };
 pub use super::patterns::{
-    AntiCloneToSatisfyBorrowChecker, FfiIdiomaticErrors, PatternBuilder, PatternContainUnSafety,
-    PatternCustomTraitsForBounds, PatternNewtype, PatternSmallCrates,
+    AntiCloneToSatisfyBorrowChecker, FfiIdiomaticErrors, PatternBuilder, PatternComposeStructs,
+    PatternContainUnSafety, PatternCustomTraitsForBounds, PatternNewtype, PatternRaiiGuard,
+    PatternSmallCrates,
 };
