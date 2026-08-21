@@ -63,6 +63,11 @@ rust-doctor
 rust-doctor ./my-crate
 ```
 
+By default, rust-doctor scans every Cargo workspace member and excludes registry,
+Git, non-member path, and vendored dependency crates. Cargo workspace membership
+is used instead of path-name heuristics, so every child member crate in a root
+workspace is included.
+
 ### Filtering
 
 ```bash
@@ -77,6 +82,9 @@ rust-doctor --fail-on error
 
 # Skip cargo check / clippy toolchain analysis
 rust-doctor --no-toolchain
+
+# Also scan resolved dependency crates
+rust-doctor --include-dependencies
 ```
 
 ### Output Formats

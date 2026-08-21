@@ -49,8 +49,7 @@ impl Rule for IdiomBorrowedArgs {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -72,7 +71,7 @@ impl Rule for IdiomBorrowedArgs {
                         severity: self.default_severity(),
                         confidence: self.default_confidence(),
                         location: Some(Location {
-                            path: src_path.to_path_buf().into(),
+                            path: src_path.to_path_buf(),
                             line: Some(finding.line),
                             column: None,
                             end_line: Some(finding.line),
@@ -191,8 +190,7 @@ impl Rule for IdiomDefaultTrait {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -259,7 +257,7 @@ impl Rule for IdiomDefaultTrait {
                                                 severity: self.default_severity(),
                                                 confidence: self.default_confidence(),
                                                 location: Some(Location {
-                                                    path: src_path.to_path_buf().into(),
+                                                    path: src_path.to_path_buf(),
                                                     line,
                                                     column: None,
                                                     end_line: line,
@@ -405,8 +403,7 @@ impl Rule for IdiomOptionIteration {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -431,7 +428,7 @@ impl Rule for IdiomOptionIteration {
                                 severity: self.default_severity(),
                                 confidence: self.default_confidence(),
                                 location: Some(Location {
-                                    path: src_path.to_path_buf().into(),
+                                    path: src_path.to_path_buf(),
                                     line: Some(finding.line),
                                     column: None,
                                     end_line: Some(finding.line),
@@ -574,8 +571,7 @@ impl Rule for IdiomPrivacyExtensibility {
         }
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -601,7 +597,7 @@ impl Rule for IdiomPrivacyExtensibility {
                                         severity: self.default_severity(),
                                         confidence: self.default_confidence(),
                                         location: Some(Location {
-                                            path: src_path.to_path_buf().into(),
+                                            path: src_path.to_path_buf(),
                                             line: Some(line),
                                             column: None,
                                             end_line: Some(line),
@@ -627,7 +623,7 @@ impl Rule for IdiomPrivacyExtensibility {
                                         severity: self.default_severity(),
                                         confidence: self.default_confidence(),
                                         location: Some(Location {
-                                            path: src_path.to_path_buf().into(),
+                                            path: src_path.to_path_buf(),
                                             line: Some(line),
                                             column: None,
                                             end_line: Some(line),
@@ -731,8 +727,7 @@ impl Rule for IdiomTemporaryMutability {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -811,7 +806,7 @@ impl Rule for IdiomTemporaryMutability {
                                                 severity: self.default_severity(),
                                                 confidence: self.default_confidence(),
                                                 location: Some(Location {
-                                                    path: src_path.to_path_buf().into(),
+                                                    path: src_path.to_path_buf(),
                                                     line: Some(line_in_file),
                                                     column: None,
                                                     end_line: Some(line_in_file),
@@ -889,8 +884,7 @@ impl Rule for IdiomReturnConsumedArgOnError {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -963,7 +957,7 @@ impl Rule for IdiomReturnConsumedArgOnError {
                                 severity: self.default_severity(),
                                 confidence: self.default_confidence(),
                                 location: Some(Location {
-                                    path: src_path.to_path_buf().into(),
+                                    path: src_path.to_path_buf(),
                                     line: Some(line),
                                     column: None,
                                     end_line: Some(line),
@@ -1030,8 +1024,7 @@ impl Rule for IdiomMemTakeReplace {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -1086,7 +1079,7 @@ impl Rule for IdiomMemTakeReplace {
                                             severity: self.default_severity(),
                                             confidence: self.default_confidence(),
                                             location: Some(Location {
-                                                path: src_path.to_path_buf().into(),
+                                                path: src_path.to_path_buf(),
                                                 line: Some(find_line),
                                                 column: None,
                                                 end_line: Some(find_line),

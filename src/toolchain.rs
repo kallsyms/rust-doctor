@@ -1,148 +1,147 @@
 //! Toolchain integration: cargo check / cargo clippy JSON ingestion.
-//!
-//! When `config.scan.include_toolchain` / `include_clippy` is true the
-//! runner spawns `cargo check --message-format=json` and
-//! `cargo clippy --message-format=json` (if available) and converts the
-//! JSON diagnostics into `rust-doctor` findings under the `Toolchain`
-//! category.
 
-use crate::diagnostic::{Category, Confidence, Finding, Location, Severity};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cargo_metadata::diagnostic::{Diagnostic, DiagnosticLevel};
+use cargo_metadata::{Message, Metadata, PackageId};
+
 use crate::config;
+use crate::diagnostic::{Category, Confidence, Finding, Location, Severity};
 
-/// Run `cargo check --message-format=json` and return findings.
-pub fn run_cargo_check(workspace_root: &std::path::Path) -> Vec<Finding> {
+pub fn run_toolchain(
+    metadata: &Metadata,
+    config: &config::Config,
+    include_dependencies: bool,
+) -> Vec<Finding> {
+    let mut findings = run_cargo_command(metadata, "check", include_dependencies);
+    if config.scan.include_clippy {
+        findings.extend(run_cargo_command(metadata, "clippy", include_dependencies));
+    }
+
+    let mut seen = HashSet::new();
+    findings.retain(|finding| {
+        let location = finding.location.as_ref();
+        seen.insert((
+            finding.rule_id.clone(),
+            finding.message.clone(),
+            location.map(|location| location.path.clone()),
+            location.and_then(|location| location.line),
+            location.and_then(|location| location.column),
+        ))
+    });
+    findings
+}
+
+fn run_cargo_command(
+    metadata: &Metadata,
+    subcommand: &str,
+    include_dependencies: bool,
+) -> Vec<Finding> {
+    let workspace_root = metadata.workspace_root.as_std_path();
     let output = match Command::new("cargo")
-        .arg("check")
+        .arg(subcommand)
+        .arg("--workspace")
+        .arg("--all-targets")
         .arg("--message-format=json")
         .current_dir(workspace_root)
         .output()
     {
-        Ok(o) if o.status.success() || o.stderr.is_empty() => o,
-        Ok(o) => o, // Even on failure we may have partial JSON on stdout.
-        Err(e) => {
-            eprintln!("warning: could not run cargo check: {e}");
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("info: cargo {subcommand} is not available; skipping");
+            return Vec::new();
+        }
+        Err(error) => {
+            eprintln!("warning: could not run cargo {subcommand}: {error}");
             return Vec::new();
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_rustc_diagnostics(&stdout, workspace_root)
+    let workspace_members = metadata
+        .workspace_members
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    parse_rustc_diagnostics(
+        output.stdout.as_slice(),
+        workspace_root,
+        metadata.target_directory.as_std_path(),
+        &workspace_members,
+        include_dependencies,
+    )
 }
 
-/// Run `cargo clippy --message-format=json` and return findings.
-///
-/// Returns an empty vec when clippy is not available.
-pub fn run_cargo_clippy(workspace_root: &std::path::Path) -> Vec<Finding> {
-    let output = match Command::new("cargo")
-        .arg("clippy")
-        .arg("--message-format=json")
-        .current_dir(workspace_root)
-        .output()
-    {
-        Ok(o) if o.status.success() || o.stderr.is_empty() => o,
-        Ok(o) => o,
-        Err(e) => {
-            // Exit code 101 is common when clippy finds lints; treat as
-            // "command ran successfully" for our purposes.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("info: clippy not available; skipping toolchain.clippy analysis");
-                return Vec::new();
+fn parse_rustc_diagnostics(
+    stdout: &[u8],
+    workspace_root: &Path,
+    target_directory: &Path,
+    workspace_members: &HashSet<PackageId>,
+    include_dependencies: bool,
+) -> Vec<Finding> {
+    Message::parse_stream(stdout)
+        .filter_map(Result::ok)
+        .filter_map(|message| match message {
+            Message::CompilerMessage(message)
+                if include_dependencies || workspace_members.contains(&message.package_id) =>
+            {
+                diagnostic_to_finding(&message.message, workspace_root, target_directory)
             }
-            eprintln!("warning: could not run cargo clippy: {e}");
-            return Vec::new();
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_rustc_diagnostics(&stdout, workspace_root)
+            _ => None,
+        })
+        .collect()
 }
 
-/// Run both cargo check and clippy (if enabled) and return combined findings.
-pub fn run_toolchain(workspace_root: &std::path::Path, cfg: &config::Config) -> Vec<Finding> {
-    let mut findings = run_cargo_check(workspace_root);
-    if cfg.scan.include_clippy {
-        let clippy_findings = run_cargo_clippy(workspace_root);
-        findings.extend(clippy_findings);
-    }
-    findings
-}
-
-// ---------------------------------------------------------------------------
-// JSON diagnostics parsing
-// ---------------------------------------------------------------------------
-
-/// Parse rustc / clippy JSON diagnostics and convert to rust-doctor findings.
-///
-/// The JSON format is described at:
-/// <https://doc.rust-lang.org/cargo/commands/cargo-rustc.html#json-format>
-fn parse_rustc_diagnostics(stdout: &str, workspace_root: &std::path::Path) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Skip non-diagnostic messages (compiler-artifact, build-script-executed, etc.)
-        if !trimmed.contains(r#""reason":"compiler-message""#) {
-            continue;
-        }
-        if let Ok(msg) = serde_json::from_str::<RustcMessage>(trimmed) {
-            // Only process top-level warnings and errors.
-            if msg.level != "warning" && msg.level != "error" {
-                continue;
-            }
-            if let Some(finding) = rustc_message_to_finding(&msg, workspace_root) {
-                findings.push(finding);
-            }
-        }
-    }
-    findings
-}
-
-fn rustc_message_to_finding(
-    msg: &RustcMessage,
-    workspace_root: &std::path::Path,
+fn diagnostic_to_finding(
+    diagnostic: &Diagnostic,
+    workspace_root: &Path,
+    target_directory: &Path,
 ) -> Option<Finding> {
-    let severity = match msg.level.as_str() {
-        "error" => Severity::Error,
-        "warning" => Severity::Warning,
+    let severity = match diagnostic.level {
+        DiagnosticLevel::Error | DiagnosticLevel::Ice => Severity::Error,
+        DiagnosticLevel::Warning => Severity::Warning,
         _ => return None,
     };
 
-    let rule_id = msg.code.as_ref().map_or("rustc.unknown".to_string(), |c| {
-        format!("toolchain.{}", c.code)
-    });
-
-    let message = msg.message.join("\n");
-
-    // Build location from the first span if available.
-    let location = msg.spans.first().map(|span| {
-        let path: PathBuf = span.file_name.clone().into();
-        let path = path
-            .strip_prefix(workspace_root)
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or(path);
-        Location {
-            path,
-            line: Some(span.line_start as u32),
-            column: Some(span.column_start as u32),
-            end_line: Some(span.line_end as u32),
-            end_column: Some(span.column_end as u32),
+    let span = diagnostic
+        .spans
+        .iter()
+        .find(|span| span.is_primary)
+        .or_else(|| diagnostic.spans.first());
+    let absolute_path = span.map(|span| {
+        let path = PathBuf::from(&span.file_name);
+        if path.is_absolute() {
+            path
+        } else {
+            workspace_root.join(path)
         }
     });
+    if absolute_path
+        .as_deref()
+        .is_some_and(|path| path.starts_with(target_directory))
+    {
+        return None;
+    }
 
-    // Collect notes and help text from the rendered message parts.
-    let suggestion = if msg.message.len() > 1 {
-        let notes: Vec<String> = msg.message[1..].to_vec();
-        Some(notes.join("\n"))
-    } else {
-        None
-    };
-
+    let location = span.zip(absolute_path).map(|(span, path)| Location {
+        path,
+        line: Some(span.line_start as u32),
+        column: Some(span.column_start as u32),
+        end_line: Some(span.line_end as u32),
+        end_column: Some(span.column_end as u32),
+    });
+    let rule_id = diagnostic.code.as_ref().map_or_else(
+        || "toolchain.unknown".to_string(),
+        |code| format!("toolchain.{}", code.code),
+    );
+    let suggestion = diagnostic
+        .children
+        .iter()
+        .filter(|child| matches!(child.level, DiagnosticLevel::Help | DiagnosticLevel::Note))
+        .map(|child| child.message.as_str())
+        .collect::<Vec<_>>();
+    let suggestion = (!suggestion.is_empty()).then(|| suggestion.join("\n"));
     let confidence = match severity {
         Severity::Error => Confidence::High,
         Severity::Warning => Confidence::Medium,
@@ -151,12 +150,12 @@ fn rustc_message_to_finding(
 
     Some(Finding {
         rule_id,
-        title: message.clone(),
+        title: diagnostic.message.clone(),
         category: Category::Toolchain,
         severity,
         confidence,
         location,
-        message,
+        message: diagnostic.message.clone(),
         why_it_matters: "Toolchain diagnostics indicate compilation issues that should be addressed for code quality and stability.".to_string(),
         suggestion,
         references: Vec::new(),
@@ -164,41 +163,68 @@ fn rustc_message_to_finding(
     })
 }
 
-// ---------------------------------------------------------------------------
-// JSON types for cargo --message-format=json
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Debug, serde::Deserialize)]
-struct RustcMessage {
-    #[serde(rename = "reason")]
-    _reason: String,
-    #[serde(rename = "rendered")]
-    message: Vec<String>,
-    #[serde(rename = "code", default)]
-    code: Option<RustcCode>,
-    #[serde(rename = "level")]
-    level: String,
-    #[serde(rename = "spans", default)]
-    spans: Vec<RustcSpan>,
-}
+    const COMPILER_MESSAGE: &str = r#"{"reason":"compiler-message","package_id":"path+file:///workspace#member@0.1.0","manifest_path":"/workspace/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"member","src_path":"/workspace/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"message":{"rendered":"warning: test warning\n","$message_type":"diagnostic","children":[{"children":[],"code":null,"level":"help","message":"do the safer thing","rendered":null,"spans":[]}],"code":{"code":"clippy::test_lint","explanation":null},"level":"warning","message":"test warning","spans":[{"byte_end":3,"byte_start":0,"column_end":4,"column_start":1,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":null,"line_end":2,"line_start":2,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":4,"highlight_start":1,"text":"bad"}]}]}}"#;
 
-#[derive(Debug, serde::Deserialize)]
-struct RustcCode {
-    code: String,
-    #[allow(dead_code)]
-    explanation: Option<String>,
-}
+    fn package_id(value: &str) -> PackageId {
+        serde_json::from_str(&format!("{value:?}")).unwrap()
+    }
 
-#[derive(Debug, serde::Deserialize)]
-struct RustcSpan {
-    #[serde(rename = "file_name")]
-    file_name: String,
-    #[serde(rename = "line_start")]
-    line_start: usize,
-    #[serde(rename = "column_start")]
-    column_start: usize,
-    #[serde(rename = "line_end")]
-    line_end: usize,
-    #[serde(rename = "column_end")]
-    column_end: usize,
+    #[test]
+    fn parses_cargo_compiler_message_envelope() {
+        let member = package_id("path+file:///workspace#member@0.1.0");
+        let findings = parse_rustc_diagnostics(
+            COMPILER_MESSAGE.as_bytes(),
+            Path::new("/workspace"),
+            Path::new("/workspace/target"),
+            &HashSet::from([member]),
+            false,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "toolchain.clippy::test_lint");
+        assert_eq!(
+            findings[0].location.as_ref().unwrap().path,
+            PathBuf::from("/workspace/src/lib.rs")
+        );
+        assert_eq!(
+            findings[0].suggestion.as_deref(),
+            Some("do the safer thing")
+        );
+    }
+
+    #[test]
+    fn excludes_non_members_and_generated_files() {
+        let other = package_id("path+file:///workspace#other@0.1.0");
+        let findings = parse_rustc_diagnostics(
+            COMPILER_MESSAGE.as_bytes(),
+            Path::new("/workspace"),
+            Path::new("/workspace/src"),
+            &HashSet::from([other.clone()]),
+            false,
+        );
+        assert!(findings.is_empty());
+
+        let findings = parse_rustc_diagnostics(
+            COMPILER_MESSAGE.as_bytes(),
+            Path::new("/workspace"),
+            Path::new("/workspace/target"),
+            &HashSet::from([other]),
+            true,
+        );
+        assert_eq!(findings.len(), 1);
+
+        let member = package_id("path+file:///workspace#member@0.1.0");
+        let findings = parse_rustc_diagnostics(
+            COMPILER_MESSAGE.as_bytes(),
+            Path::new("/workspace"),
+            Path::new("/workspace/src"),
+            &HashSet::from([member]),
+            false,
+        );
+        assert!(findings.is_empty());
+    }
 }

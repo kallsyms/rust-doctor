@@ -5,8 +5,14 @@
 //! concrete rule instances and drives execution.
 
 use crate::diagnostic::Finding;
-use cargo_metadata::Metadata;
-use std::path::PathBuf;
+use cargo_metadata::{Metadata, Package, PackageId};
+use std::path::{Path, PathBuf};
+
+pub struct PackageManifest {
+    pub package_name: String,
+    pub path: PathBuf,
+    pub content: String,
+}
 
 // ---------------------------------------------------------------------------
 // RuleContext
@@ -18,8 +24,18 @@ pub struct RuleContext<'a> {
     pub workspace_root: PathBuf,
     /// Metadata from `cargo metadata`.
     pub metadata: &'a Metadata,
-    /// Manifest contents keyed by package ID for quick lookup.
-    pub manifests: std::collections::HashMap<String, String>,
+    pub manifests: Vec<PackageManifest>,
+    pub package_source_files: std::collections::HashMap<PackageId, Vec<PathBuf>>,
+}
+
+impl RuleContext<'_> {
+    pub fn source_files(&self, package: &Package) -> impl Iterator<Item = &Path> {
+        self.package_source_files
+            .get(&package.id)
+            .into_iter()
+            .flatten()
+            .map(PathBuf::as_path)
+    }
 }
 
 // ---------------------------------------------------------------------------

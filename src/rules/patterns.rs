@@ -51,8 +51,7 @@ impl Rule for PatternBuilder {
         const PARAM_THRESHOLD: usize = 5;
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -111,7 +110,7 @@ impl Rule for PatternBuilder {
                                 severity: self.default_severity(),
                                 confidence: self.default_confidence(),
                                 location: Some(Location {
-                                    path: src_path.to_path_buf().into(),
+                                    path: src_path.to_path_buf(),
                                     line: Some(line),
                                     column: None,
                                     end_line: Some(line),
@@ -190,8 +189,7 @@ impl Rule for PatternContainUnSafety {
         let mut unsafe_details: Vec<(String, usize)> = Vec::new();
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -200,7 +198,7 @@ impl Rule for PatternContainUnSafety {
                 if block_count > 0 {
                     unsafe_file_count += 1;
                     total_unsafe_blocks += block_count;
-                    let file_display = src_path.to_string();
+                    let file_display = src_path.display().to_string();
                     unsafe_details.push((file_display, block_count));
                 }
             }
@@ -284,8 +282,7 @@ impl Rule for PatternCustomTraitsForBounds {
         const WHERE_CLAUSE_CHAR_THRESHOLD: usize = 80;
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -301,7 +298,7 @@ impl Rule for PatternCustomTraitsForBounds {
                             analyze_fn_where_clause(
                                 fn_item,
                                 &content,
-                                src_path.as_std_path(),
+                                src_path,
                                 self,
                                 out,
                                 WHERE_CLAUSE_CHAR_THRESHOLD,
@@ -311,7 +308,7 @@ impl Rule for PatternCustomTraitsForBounds {
                             analyze_impl_where_clause(
                                 imp,
                                 &content,
-                                src_path.as_std_path(),
+                                src_path,
                                 self,
                                 out,
                                 WHERE_CLAUSE_CHAR_THRESHOLD,
@@ -321,7 +318,7 @@ impl Rule for PatternCustomTraitsForBounds {
                             analyze_trait_where_clause(
                                 tr,
                                 &content,
-                                src_path.as_std_path(),
+                                src_path,
                                 self,
                                 out,
                                 WHERE_CLAUSE_CHAR_THRESHOLD,
@@ -522,8 +519,7 @@ impl Rule for PatternSmallCrates {
             let mut file_count: usize = 0;
             let mut large_files: Vec<(String, usize)> = Vec::new();
 
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -533,29 +529,7 @@ impl Rule for PatternSmallCrates {
                         total_lines += line_count;
                         file_count += 1;
                         if line_count > 300 {
-                            large_files.push((src_path.to_string(), line_count));
-                        }
-                    }
-                }
-            }
-
-            // Also check for subdirectories that might be large modules
-            for pkg2 in ctx.metadata.packages.iter() {
-                for target in &pkg2.targets {
-                    let src_path = target.src_path.as_path();
-                    if src_path.is_dir() {
-                        // Count files in the directory
-                        let mut dir_files: Vec<std::path::PathBuf> = Vec::new();
-                        collect_files(src_path.as_std_path(), &mut dir_files);
-                        file_count += dir_files.len();
-                        for f in &dir_files {
-                            if let Ok(content) = std::fs::read_to_string(f) {
-                                total_lines += content.lines().count();
-                                let line_count = content.lines().count();
-                                if line_count > 300 {
-                                    large_files.push((f.display().to_string(), line_count));
-                                }
-                            }
+                            large_files.push((src_path.display().to_string(), line_count));
                         }
                     }
                 }
@@ -643,33 +617,6 @@ impl Rule for PatternSmallCrates {
     }
 }
 
-fn collect_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-    if !dir.is_dir() {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name() == Some("target".as_ref())
-                || path.file_name() == Some(".git".as_ref())
-            {
-                continue;
-            }
-            collect_files(&path, files);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            files.push(path);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 
 /// Flag `.clone()` used to work around borrow-checker conflicts.
@@ -716,8 +663,7 @@ impl Rule for AntiCloneToSatisfyBorrowChecker {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -741,7 +687,7 @@ impl Rule for AntiCloneToSatisfyBorrowChecker {
                         let mut visitor = CloneChecker {
                             fn_name: &fn_name,
                             content: &content,
-                            src_path: src_path.to_path_buf().into(),
+                            src_path: src_path.to_path_buf(),
                             findings: Vec::new(),
                         };
                         visitor.visit_item_fn(fn_item);
@@ -928,8 +874,7 @@ impl Rule for PatternComposeStructs {
         const FIELD_THRESHOLD: usize = 8;
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -968,7 +913,7 @@ impl Rule for PatternComposeStructs {
                                 severity: self.default_severity(),
                                 confidence: self.default_confidence(),
                                 location: Some(Location {
-                                    path: src_path.to_path_buf().into(),
+                                    path: src_path.to_path_buf(),
                                     line: Some(line),
                                     column: None,
                                     end_line: Some(line),
@@ -1047,8 +992,7 @@ impl Rule for PatternRaiiGuard {
         const CLEANUP_METHODS: [&str; 5] = ["close", "free", "release", "dispose", "shutdown"];
 
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -1060,7 +1004,7 @@ impl Rule for PatternRaiiGuard {
 
                 let mut visitor = RaiiVisitor {
                     content: &content,
-                    src_path: src_path.to_path_buf().into(),
+                    src_path: src_path.to_path_buf(),
                     cleanup_methods: &CLEANUP_METHODS,
                     findings: out,
                 };

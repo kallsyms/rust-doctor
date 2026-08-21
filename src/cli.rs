@@ -36,6 +36,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_toolchain: bool,
 
+    /// Include non-workspace dependency crates
+    #[arg(long)]
+    pub include_dependencies: bool,
+
     /// Path to config file
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -89,9 +93,13 @@ impl Runner {
     pub fn run(self) -> anyhow::Result<()> {
         let scan_path =
             std::fs::canonicalize(&self.cli.path).unwrap_or_else(|_| self.cli.path.clone());
-        let workspace = workspace::Workspace::discover(&scan_path)?;
+        let workspace = workspace::Workspace::discover_with_dependencies(
+            &scan_path,
+            self.cli.include_dependencies,
+        )?;
+        let source_files = workspace.source_files.clone();
         let report = workspace.scan(&self.config)?;
-        let report = self.apply_filters(report);
+        let report = self.apply_filters(report, &source_files);
 
         match self.cli.format {
             OutputFormat::Human => {
@@ -127,25 +135,17 @@ impl Runner {
         Ok(())
     }
 
-    fn apply_filters(&self, mut report: Report) -> Report {
+    fn apply_filters(&self, mut report: Report, source_files: &[PathBuf]) -> Report {
         // Apply source-level suppressions (rust-doctor-allow / rust-doctor-disable-next-line).
         let mut suppressed_rules: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        let mut line_suppressions: Vec<(std::path::PathBuf, String, u32)> = Vec::new();
 
-        // Scan all .rs files in the workspace root for suppressions.
-        if report.workspace_root.is_dir() {
-            let mut all_files = Vec::new();
-            analysis::collect_rust_files(&report.workspace_root, &mut all_files);
-            for file_path in all_files {
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                    let suppressions = analysis::parse_suppressions(&content);
-                    for sup in suppressions {
-                        if let Some(ref rule_id) = sup.rule_id {
-                            suppressed_rules.insert(rule_id.clone());
-                        }
-                        let rid = sup.rule_id.clone().unwrap_or_default();
-                        line_suppressions.push((file_path.clone(), rid, sup.line));
+        for file_path in source_files {
+            if let Ok(content) = std::fs::read_to_string(file_path) {
+                let suppressions = analysis::parse_suppressions(&content);
+                for sup in suppressions {
+                    if let Some(ref rule_id) = sup.rule_id {
+                        suppressed_rules.insert(rule_id.clone());
                     }
                 }
             }
@@ -224,5 +224,19 @@ fn category_label(cat: &Category) -> &'static str {
         Category::AntiPattern => "AntiPattern",
         Category::Organization => "Organization",
         Category::Toolchain => "Toolchain",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependencies_are_excluded_by_default_and_can_be_included() {
+        let cli = Cli::try_parse_from(["rust-doctor"]).unwrap();
+        assert!(!cli.include_dependencies);
+
+        let cli = Cli::try_parse_from(["rust-doctor", "--include-dependencies"]).unwrap();
+        assert!(cli.include_dependencies);
     }
 }

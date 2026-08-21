@@ -91,12 +91,12 @@ impl Rule for AntiDenyWarnings {
             }
         }
 
-        for (pkg_id, content) in &ctx.manifests {
-            if let Some(pos) = content
+        for manifest in &ctx.manifests {
+            if let Some(pos) = manifest
+                .content
                 .lines()
                 .position(|l| l.contains("warnings") && l.contains("deny"))
             {
-                let manifest_path = ctx.workspace_root.join("Cargo.toml");
                 out.push(Finding {
                     rule_id: self.id().to_string(),
                     title: self.title().to_string(),
@@ -104,13 +104,16 @@ impl Rule for AntiDenyWarnings {
                     severity: self.default_severity(),
                     confidence: Confidence::High,
                     location: Some(Location {
-                        path: manifest_path,
+                        path: manifest.path.clone(),
                         line: Some((pos + 1) as u32),
                         column: None,
                         end_line: Some((pos + 1) as u32),
                         end_column: None,
                     }),
-                    message: format!("Package \"{}\" has `[lints] warnings = \"deny\"`", pkg_id),
+                    message: format!(
+                        "Package \"{}\" has `[lints] warnings = \"deny\"`",
+                        manifest.package_name
+                    ),
                     why_it_matters:
                         "Same risk as `#![deny(warnings)]`: future lints will be silently ignored."
                             .to_string(),
@@ -176,8 +179,7 @@ impl Rule for AntiDerefPolymorphism {
 
     fn check(&self, ctx: &RuleContext, out: &mut Vec<Finding>) -> anyhow::Result<()> {
         for pkg in ctx.metadata.packages.iter() {
-            for target in &pkg.targets {
-                let src_path = target.src_path.as_path();
+            for src_path in ctx.source_files(pkg) {
                 if !src_path.exists() {
                     continue;
                 }
@@ -209,7 +211,7 @@ impl Rule for AntiDerefPolymorphism {
                                             severity: self.default_severity(),
                                             confidence: self.default_confidence(),
                                             location: Some(Location {
-                                                path: src_path.to_path_buf().into(),
+                                                path: src_path.to_path_buf(),
                                                 line,
                                                 column: None,
                                                 end_line: line,

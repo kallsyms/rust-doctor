@@ -14,7 +14,7 @@ pub struct Config {
 }
 
 /// [scan] section.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ScanConfig {
     #[serde(default = "default_true")]
     pub include_toolchain: bool,
@@ -26,6 +26,16 @@ pub struct ScanConfig {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            include_toolchain: true,
+            include_clippy: true,
+            fail_on: None,
+        }
+    }
 }
 
 /// [rules] section.
@@ -64,5 +74,26 @@ impl Config {
             config.scan.include_clippy = false;
         }
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolchain_analysis_is_enabled_by_default() {
+        let config = Config::load(None, false);
+
+        assert!(config.scan.include_toolchain);
+        assert!(config.scan.include_clippy);
+    }
+
+    #[test]
+    fn no_toolchain_disables_check_and_clippy() {
+        let config = Config::load(None, true);
+
+        assert!(!config.scan.include_toolchain);
+        assert!(!config.scan.include_clippy);
     }
 }

@@ -1,215 +1,252 @@
 //! Workspace discovery and scanning.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 
 use crate::analysis;
 use crate::config::Config;
 use crate::diagnostic::Report;
-use crate::rules::registry::{Registry, RuleContext};
+use crate::rules::registry::{PackageManifest, Registry, RuleContext};
 use crate::toolchain::run_toolchain;
 
-/// Represents a discovered Rust workspace with its packages and source files.
 pub struct Workspace {
     pub root: PathBuf,
-    pub packages: Vec<Package>,
     pub source_files: Vec<PathBuf>,
-}
-
-/// A single package within the workspace.
-pub struct Package {
-    pub name: String,
-    pub manifest_path: PathBuf,
-    pub source_lib: Option<PathBuf>,
-    pub source_bins: Vec<PathBuf>,
-    pub is_library: bool,
-    pub is_binary: bool,
-    pub publish: bool,
+    metadata: Option<Metadata>,
+    package_source_files: HashMap<PackageId, Vec<PathBuf>>,
+    include_dependencies: bool,
 }
 
 impl Workspace {
-    /// Whether this workspace was discovered via a Cargo.toml manifest.
-    pub fn has_manifest(&self) -> bool {
-        !self.packages.is_empty()
+    pub fn discover(path: &Path) -> anyhow::Result<Self> {
+        Self::discover_with_dependencies(path, false)
     }
 
-    /// Discover a workspace starting from the given path.
-    ///
-    /// If a Cargo.toml is found directly in the given path, uses `cargo_metadata`
-    /// for full workspace discovery.  Otherwise falls back to loose Rust-file
-    /// discovery in that directory.
-    pub fn discover(path: &Path) -> anyhow::Result<Self> {
-        // Only look for a Cargo.toml directly in the given path (not parent dirs).
+    pub fn discover_with_dependencies(
+        path: &Path,
+        include_dependencies: bool,
+    ) -> anyhow::Result<Self> {
         let manifest_path = path.join("Cargo.toml");
-        if manifest_path.is_file() {
-            let root = manifest_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or(path.to_path_buf());
-
-            let metadata = MetadataCommand::new()
-                .manifest_path(&manifest_path)
-                .exec()?;
-
-            let mut packages = Vec::new();
-            let mut source_files = Vec::new();
-
-            for pkg in &metadata.packages {
-                let mut is_library = false;
-                let mut is_binary = false;
-                let mut source_lib = None;
-                let mut source_bins = Vec::new();
-                let mut publish = true;
-
-                if let Ok(manifest_content) = std::fs::read_to_string(&pkg.manifest_path) {
-                    if let Ok(table) = manifest_content.parse::<toml::Value>() {
-                        if let Some(false) = table
-                            .get("package")
-                            .and_then(|p| p.get("publish"))
-                            .and_then(|v| v.as_bool())
-                        {
-                            publish = false;
-                        }
-                    }
-                }
-
-                for target in &pkg.targets {
-                    for kind in &target.kind {
-                        match kind.as_str() {
-                            "lib" => {
-                                is_library = true;
-                                if let Some(lib_target) = target.src_path.as_os_str().to_str() {
-                                    source_lib = Some(PathBuf::from(lib_target));
-                                }
-                            }
-                            "bin" => {
-                                is_binary = true;
-                                if let Some(bin_path) = target.src_path.as_os_str().to_str() {
-                                    source_bins.push(PathBuf::from(bin_path));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                packages.push(Package {
-                    name: pkg.name.clone(),
-                    manifest_path: pkg.manifest_path.clone().into(),
-                    source_lib,
-                    source_bins,
-                    is_library,
-                    is_binary,
-                    publish,
-                });
-            }
-
-            // Collect lib and bin source files first.
-            for pkg in &packages {
-                if let Some(ref lib_path) = pkg.source_lib {
-                    if lib_path.is_file() {
-                        source_files.push(lib_path.clone());
-                    }
-                }
-                for bin_path in &pkg.source_bins {
-                    if bin_path.is_file() {
-                        source_files.push(bin_path.clone());
-                    }
-                }
-            }
-
-            // Now scan for module files under src/**/*.rs for each package.
-            for pkg in &packages {
-                let pkg_root = pkg
-                    .manifest_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| pkg.manifest_path.clone());
-
-                // Look for a src/ directory relative to the manifest.
-                let src_dir = pkg_root.join("src");
-                if src_dir.is_dir() {
-                    let mut module_files = Vec::new();
-                    analysis::collect_rust_files(&src_dir, &mut module_files);
-                    for f in module_files {
-                        // Avoid duplicates (lib.rs and main.rs may already be included).
-                        if !source_files.contains(&f) {
-                            source_files.push(f);
-                        }
-                    }
-                }
-            }
-
-            Ok(Workspace {
-                root,
-                packages,
-                source_files,
-            })
-        } else {
-            // Fallback: discover loose .rs files in the directory tree.
+        if !manifest_path.is_file() {
             let mut source_files = Vec::new();
             analysis::collect_rust_files(path, &mut source_files);
-            Ok(Workspace {
+            source_files.sort();
+            source_files.dedup();
+            return Ok(Self {
                 root: path.to_path_buf(),
-                packages: Vec::new(),
                 source_files,
-            })
+                metadata: None,
+                package_source_files: HashMap::new(),
+                include_dependencies,
+            });
         }
+
+        let mut command = MetadataCommand::new();
+        command.manifest_path(&manifest_path);
+        if !include_dependencies {
+            command.no_deps();
+        }
+        let metadata = command.exec()?;
+        let root = metadata.workspace_root.clone().into_std_path_buf();
+        let package_source_files = collect_package_source_files(&metadata.packages);
+        let mut source_files = package_source_files
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        source_files.sort();
+        source_files.dedup();
+
+        Ok(Self {
+            root,
+            source_files,
+            metadata: Some(metadata),
+            package_source_files,
+            include_dependencies,
+        })
     }
 
-    /// Run all custom rules against the workspace and return a report.
     pub fn scan(self, config: &Config) -> anyhow::Result<Report> {
-        // Collect manifest contents for rules that need them.
-        let manifests: std::collections::HashMap<String, String> = self
-            .packages
-            .iter()
-            .filter_map(|pkg| {
-                std::fs::read_to_string(&pkg.manifest_path)
-                    .ok()
-                    .map(|c| (pkg.name.clone(), c))
-            })
-            .collect();
-
-        // Build metadata if we have a manifest.
-        let metadata = if self.has_manifest() {
-            let m = MetadataCommand::new()
-                .manifest_path(self.root.join("Cargo.toml"))
-                .exec()?;
-            Some(m)
-        } else {
-            None
-        };
-
-        let registry = Registry::new();
         let mut findings = Vec::new();
 
-        if let Some(ref metadata) = metadata {
+        if let Some(metadata) = self.metadata {
+            let manifests = metadata
+                .packages
+                .iter()
+                .filter_map(|package| {
+                    let path = package.manifest_path.clone().into_std_path_buf();
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .map(|content| PackageManifest {
+                            package_name: package.name.clone(),
+                            path,
+                            content,
+                        })
+                })
+                .collect();
+
             let ctx = RuleContext {
                 workspace_root: self.root.clone(),
-                metadata,
+                metadata: &metadata,
                 manifests,
+                package_source_files: self.package_source_files,
             };
 
-            for rule in registry.iter() {
-                if let Err(e) = rule.check(&ctx, &mut findings) {
-                    eprintln!("warning: rule {} failed: {e}", rule.id());
+            for rule in Registry::new().iter() {
+                if let Err(error) = rule.check(&ctx, &mut findings) {
+                    eprintln!("warning: rule {} failed: {error}", rule.id());
                 }
             }
-        }
-        // When there's no manifest, custom rules that need metadata are
-        // simply skipped – loose-file scanning cannot satisfy them.
 
-        // Run toolchain analysis if enabled.
-        if config.scan.include_toolchain {
-            let toolchain_findings = run_toolchain(&self.root, config);
-            findings.extend(toolchain_findings);
+            if config.scan.include_toolchain {
+                findings.extend(run_toolchain(&metadata, config, self.include_dependencies));
+            }
         }
+
+        let mut seen = HashSet::new();
+        findings.retain(|finding| {
+            let location = finding.location.as_ref();
+            seen.insert((
+                finding.rule_id.clone(),
+                finding.message.clone(),
+                location.map(|location| location.path.clone()),
+                location.and_then(|location| location.line),
+                location.and_then(|location| location.column),
+            ))
+        });
 
         let mut report = Report::new(env!("CARGO_PKG_VERSION").to_string(), self.root);
         report.findings = findings;
         report.compute_summary();
-
         Ok(report)
+    }
+}
+
+fn collect_package_source_files(packages: &[Package]) -> HashMap<PackageId, Vec<PathBuf>> {
+    packages
+        .iter()
+        .map(|package| {
+            let package_root = package
+                .manifest_path
+                .parent()
+                .map(|path| path.to_path_buf().into_std_path_buf())
+                .unwrap_or_default();
+            let mut files = Vec::new();
+            analysis::collect_rust_files(&package_root.join("src"), &mut files);
+            files.extend(
+                package
+                    .targets
+                    .iter()
+                    .map(|target| target.src_path.clone().into_std_path_buf())
+                    .filter(|path| path.is_file()),
+            );
+            files.sort();
+            files.dedup();
+            (package.id.clone(), files)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn default_scope_includes_all_workspace_members_and_excludes_path_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/one", "crates/two"]
+exclude = ["vendor/dependency"]
+resolver = "2"
+"#,
+        );
+        write(
+            &temp.path().join("crates/one/Cargo.toml"),
+            r#"
+[package]
+name = "one"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dependency = { path = "../../vendor/dependency" }
+"#,
+        );
+        write(&temp.path().join("crates/one/src/lib.rs"), "mod nested;\n");
+        write(
+            &temp.path().join("crates/one/src/nested.rs"),
+            "pub struct VisibleModule;\n",
+        );
+        write(
+            &temp.path().join("crates/two/Cargo.toml"),
+            r#"
+[package]
+name = "two"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(&temp.path().join("crates/two/src/lib.rs"), "");
+        write(
+            &temp.path().join("vendor/dependency/Cargo.toml"),
+            r#"
+[package]
+name = "dependency"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            &temp.path().join("vendor/dependency/src/lib.rs"),
+            "pub struct Dependency;\n",
+        );
+
+        let workspace = Workspace::discover(temp.path()).unwrap();
+        let package_names = workspace
+            .metadata
+            .as_ref()
+            .unwrap()
+            .packages
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(package_names, ["one", "two"]);
+        assert!(workspace
+            .source_files
+            .contains(&temp.path().join("crates/one/src/nested.rs")));
+        assert!(!workspace
+            .source_files
+            .contains(&temp.path().join("vendor/dependency/src/lib.rs")));
+
+        let report = workspace.scan(&Config::load(None, true)).unwrap();
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule_id == "idiom.privacy-extensibility"
+                && finding
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| location.path.ends_with("crates/one/src/nested.rs"))
+        }));
+
+        let workspace = Workspace::discover_with_dependencies(temp.path(), true).unwrap();
+        assert!(workspace
+            .metadata
+            .as_ref()
+            .unwrap()
+            .packages
+            .iter()
+            .any(|package| package.name == "dependency"));
     }
 }
